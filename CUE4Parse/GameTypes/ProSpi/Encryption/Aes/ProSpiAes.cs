@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -24,8 +25,12 @@ public static class ProSpiAes
     private const uint WaitObject0 = 0x00000000;
     private const uint WaitTimeout = 0x00000102;
 
-    private const long ProSpiDecryptDataRva = 0x4713DA0;
     private const long ProSpi24DecryptDataRva = 0x46F6DC0;
+    private static readonly (string Build, long Rva)[] ProSpiDecryptBuilds =
+    {
+        ("eBaseball PRO SPIRIT", 0x46D2F80),
+        ("Professional Baseball Spirits 2024-2025", 0x4713DA0)
+    };
     private const int RemoteCallTimeoutMs = 15_000;
     private static readonly byte[] DecryptDataEntrySignature =
     {
@@ -38,24 +43,15 @@ public static class ProSpiAes
     private static int _processId;
     private static long _moduleBase;
     private static long _decryptDataRva;
+    private static string? _projectRoot;
+    private static string? _decryptBuild;
 
     public static bool IsProSpiArchive(string path)
     {
         if (string.IsNullOrWhiteSpace(path))
             return false;
 
-        string normalized;
-        try
-        {
-            normalized = Path.GetFullPath(path)
-                .Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar)
-                .TrimEnd(Path.DirectorySeparatorChar);
-        }
-        catch
-        {
-            normalized = path.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar)
-                .TrimEnd(Path.DirectorySeparatorChar);
-        }
+        var normalized = NormalizePath(path);
 
         // Match the Unreal project-relative layout, independent of Steam library or drive.
         var paksMarker = $"{Path.DirectorySeparatorChar}prospi{Path.DirectorySeparatorChar}Content{Path.DirectorySeparatorChar}Paks";
@@ -75,26 +71,25 @@ public static class ProSpiAes
 
         lock (BridgeLock)
         {
-            EnsureBridge();
+            EnsureBridge(reader.Path);
             return RemoteDecrypt(input, reader.EncryptionKeyGuid);
         }
     }
 
-    private static void EnsureBridge()
+    private static void EnsureBridge(string archivePath)
     {
-        if (_processHandle != IntPtr.Zero && IsProcessStillRunning(_processId))
-            return;
-
-        if (_processHandle != IntPtr.Zero)
+        var requestedProjectRoot = GetProjectRoot(archivePath, "Content", "Paks");
+        if (_processHandle != IntPtr.Zero &&
+            IsProcessStillRunning(_processId) &&
+            (requestedProjectRoot == null ||
+             requestedProjectRoot.Equals(_projectRoot, StringComparison.OrdinalIgnoreCase)))
         {
-            CloseHandle(_processHandle);
-            _processHandle = IntPtr.Zero;
-            _processId = 0;
-            _moduleBase = 0;
-            _decryptDataRva = 0;
+            return;
         }
 
-        var process = FindProSpiProcess() ?? throw new InvalidOperationException(
+        ResetBridge();
+
+        using var process = FindProSpiProcess(requestedProjectRoot) ?? throw new InvalidOperationException(
             "ProSpi custom decryption requires prospi-Win64-Shipping.exe or prospi24-Win64-Shipping.exe to be running.");
 
         var handle = OpenProcess(
@@ -104,34 +99,74 @@ public static class ProSpiAes
         if (handle == IntPtr.Zero)
             throw new InvalidOperationException($"OpenProcess failed for {process.ProcessName} ({process.Id}): {Marshal.GetLastWin32Error()}");
 
-        var mainModule = process.MainModule ?? throw new InvalidOperationException($"Could not read main module for {process.ProcessName} ({process.Id}).");
-        _processHandle = handle;
-        _processId = process.Id;
-        _moduleBase = mainModule.BaseAddress.ToInt64();
-        _decryptDataRva = process.ProcessName.Equals("prospi24-Win64-Shipping", StringComparison.OrdinalIgnoreCase)
-            ? ProSpi24DecryptDataRva
-            : ProSpiDecryptDataRva;
+        try
+        {
+            var mainModule = process.MainModule ?? throw new InvalidOperationException($"Could not read main module for {process.ProcessName} ({process.Id}).");
+            var moduleBase = mainModule.BaseAddress.ToInt64();
+            var (build, decryptDataRva) = ResolveDecryptDataEntry(handle, moduleBase, process.ProcessName);
 
-        ValidateDecryptDataEntry(process.ProcessName);
-        Log.Information("ProSpi live decrypt bridge attached to {ProcessName} ({ProcessId}) at 0x{ModuleBase:X}, DecryptData RVA 0x{DecryptDataRva:X}", process.ProcessName, _processId, _moduleBase, _decryptDataRva);
+            _processHandle = handle;
+            _processId = process.Id;
+            _moduleBase = moduleBase;
+            _decryptDataRva = decryptDataRva;
+            _projectRoot = GetProjectRoot(mainModule.FileName, "Binaries", "Win64") ?? requestedProjectRoot;
+            _decryptBuild = build;
+        }
+        catch
+        {
+            CloseHandle(handle);
+            throw;
+        }
+
+        Log.Information(
+            "ProSpi live decrypt bridge attached to {Build} via {ProcessName} ({ProcessId}) at 0x{ModuleBase:X}, DecryptData RVA 0x{DecryptDataRva:X}",
+            _decryptBuild, process.ProcessName, _processId, _moduleBase, _decryptDataRva);
     }
 
-    private static Process? FindProSpiProcess()
+    private static Process? FindProSpiProcess(string? requestedProjectRoot)
     {
+        var fallbacks = new List<Process>();
+
         foreach (var processName in new[] { "prospi-Win64-Shipping", "prospi24-Win64-Shipping" })
         {
             foreach (var process in Process.GetProcessesByName(processName))
             {
                 try
                 {
-                    _ = process.MainModule;
-                    return process;
+                    var mainModule = process.MainModule;
+                    var processProjectRoot = mainModule == null
+                        ? null
+                        : GetProjectRoot(mainModule.FileName, "Binaries", "Win64");
+
+                    if (requestedProjectRoot != null &&
+                        processProjectRoot != null &&
+                        requestedProjectRoot.Equals(processProjectRoot, StringComparison.OrdinalIgnoreCase))
+                    {
+                        foreach (var fallback in fallbacks)
+                            fallback.Dispose();
+                        return process;
+                    }
+
+                    fallbacks.Add(process);
                 }
                 catch
                 {
                     process.Dispose();
                 }
             }
+        }
+
+        if (requestedProjectRoot == null && fallbacks.Count == 1)
+            return fallbacks[0];
+
+        foreach (var fallback in fallbacks)
+            fallback.Dispose();
+
+        if (fallbacks.Count > 0)
+        {
+            throw new InvalidOperationException(
+                $"Found {fallbacks.Count} running ProSpi processes, but none matched archive root '{requestedProjectRoot}'. " +
+                "Close the unrelated game or open archives from the matching installation.");
         }
 
         return null;
@@ -203,24 +238,74 @@ public static class ProSpiAes
         }
     }
 
-    private static void ValidateDecryptDataEntry(string processName)
+    private static (string Build, long Rva) ResolveDecryptDataEntry(IntPtr processHandle, long moduleBase, string processName)
     {
-        var address = new IntPtr(_moduleBase + _decryptDataRva);
-        var actual = new byte[DecryptDataEntrySignature.Length];
-        if (!ReadProcessMemory(_processHandle, address, actual, actual.Length, out var bytesRead) ||
-            bytesRead.ToInt64() != actual.Length)
+        (string Build, long Rva)[] candidates = processName.Equals("prospi24-Win64-Shipping", StringComparison.OrdinalIgnoreCase)
+            ? new[] { (Build: "Professional Baseball Spirits 2024-2025 (prospi24)", Rva: ProSpi24DecryptDataRva) }
+            : ProSpiDecryptBuilds;
+        var matches = new List<(string Build, long Rva)>();
+
+        foreach (var candidate in candidates)
         {
-            throw new InvalidOperationException(
-                $"ReadProcessMemory failed while validating ProSpi DecryptData entry for {processName}: {Marshal.GetLastWin32Error()}");
+            var address = new IntPtr(moduleBase + candidate.Rva);
+            var actual = new byte[DecryptDataEntrySignature.Length];
+            if (ReadProcessMemory(processHandle, address, actual, actual.Length, out var bytesRead) &&
+                bytesRead.ToInt64() == actual.Length &&
+                actual.AsSpan().SequenceEqual(DecryptDataEntrySignature))
+            {
+                matches.Add(candidate);
+            }
         }
 
-        if (actual.AsSpan().SequenceEqual(DecryptDataEntrySignature))
-            return;
+        if (matches.Count == 1)
+            return matches[0];
 
+        var candidateRvas = string.Join(", ", Array.ConvertAll(candidates, candidate => $"0x{candidate.Rva:X}"));
+        var reason = matches.Count == 0
+            ? "none of the known entries matched"
+            : "more than one known entry matched";
         throw new InvalidOperationException(
-            $"ProSpi DecryptData signature mismatch for {processName} at 0x{address.ToInt64():X}. " +
-            $"Expected {Convert.ToHexString(DecryptDataEntrySignature)}, got {Convert.ToHexString(actual)}. " +
+            $"Could not identify the ProSpi build for {processName}: {reason} ({candidateRvas}). " +
             "Refusing to run the live decrypt bridge.");
+    }
+
+    private static string NormalizePath(string path)
+    {
+        try
+        {
+            return Path.GetFullPath(path)
+                .Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar)
+                .TrimEnd(Path.DirectorySeparatorChar);
+        }
+        catch
+        {
+            return path.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar)
+                .TrimEnd(Path.DirectorySeparatorChar);
+        }
+    }
+
+    private static string? GetProjectRoot(string? path, string directory, string childDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return null;
+
+        var normalized = NormalizePath(path);
+        var marker = $"{Path.DirectorySeparatorChar}{directory}{Path.DirectorySeparatorChar}{childDirectory}";
+        var markerIndex = normalized.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+        return markerIndex <= 0 ? null : normalized[..markerIndex];
+    }
+
+    private static void ResetBridge()
+    {
+        if (_processHandle != IntPtr.Zero)
+            CloseHandle(_processHandle);
+
+        _processHandle = IntPtr.Zero;
+        _processId = 0;
+        _moduleBase = 0;
+        _decryptDataRva = 0;
+        _projectRoot = null;
+        _decryptBuild = null;
     }
 
     private static void WriteRemote(IntPtr address, byte[] data, string description)
