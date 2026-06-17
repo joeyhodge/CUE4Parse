@@ -239,7 +239,8 @@ public partial class IoStoreReader : AbstractAesVfsReader
 
         var compressedBuffer = Array.Empty<byte>();
         var uncompressedBuffer = Array.Empty<byte>();
-        var proSpiEncryptedPayload = IsEncrypted && ProSpiAes.IsProSpiArchive(Path);
+        var proSpiEncryptedPayload = IsEncrypted &&
+            (Game == EGame.GAME_eBaseballProSpirit || ProSpiAes.IsProSpiArchive(Path));
 
         FArchive?[]? clonedReaders = null;
         long size = 0;

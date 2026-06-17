@@ -28,6 +28,7 @@ public static class ProSpiAes
     private const long ProSpi24DecryptDataRva = 0x46F6DC0;
     private static readonly (string Build, long Rva)[] ProSpiDecryptBuilds =
     {
+        ("eBaseball PRO SPIRIT 2.1.0", 0x4954460),
         ("eBaseball PRO SPIRIT", 0x46D2F80),
         ("Professional Baseball Spirits 2024-2025", 0x4713DA0)
     };

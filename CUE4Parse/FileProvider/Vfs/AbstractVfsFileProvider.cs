@@ -1,12 +1,6 @@
-using System;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
-using System.IO;
-using System.Linq;
 using System.Runtime.CompilerServices;
-using System.Threading;
-using System.Threading.Tasks;
 using CUE4Parse.Encryption.Aes;
 using CUE4Parse.FileProvider.Objects;
 using CUE4Parse.GameTypes.ABI.Encryption.Aes;
@@ -101,6 +95,7 @@ namespace CUE4Parse.FileProvider.Vfs
                 EGame.GAME_AssaultFireFuture => AssaultFireFutureAes.AssaultFireFutureDecrypt,
                 EGame.GAME_ArcRaiders => ArcRaidersAes.ArcRaidersDecrypt,
                 EGame.GAME_RocoKingdomWorld => RocoKingdomWorldAes.RocoKingdomWorldDecrypt,
+                EGame.GAME_eBaseballProSpirit => ProSpiEncryption.ProSpiDecrypt,
                 _ => null
             };
         }
@@ -264,8 +259,14 @@ namespace CUE4Parse.FileProvider.Vfs
 
             _unloadedVfs[reader] = null;
             reader.IsConcurrent = isConcurrent;
-            if (ProSpiAes.IsProSpiArchive(reader.Path))
+            if (reader.Game == EGame.GAME_eBaseballProSpirit)
             {
+                // Prefer the versioned static decryptor when the dedicated game profile is selected.
+                reader.CustomEncryption = ProSpiEncryption.ProSpiDecrypt;
+            }
+            else if (ProSpiAes.IsProSpiArchive(reader.Path))
+            {
+                // Preserve the live bridge for older profiles and Professional Baseball Spirits builds.
                 reader.CustomEncryption = ProSpiAes.ProSpiDecrypt;
             }
             else if (!(reader.Game == EGame.GAME_MarvelRivals && reader is IoStoreReader)) // no custom encryption for MR IoStore

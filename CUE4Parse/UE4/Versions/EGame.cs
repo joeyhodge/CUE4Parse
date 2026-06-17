@@ -140,6 +140,9 @@ public enum EGame : uint
         GAME_BloodBowl3 = GAME_UE4_27 + 31,
         GAME_ChasingKaleidoRIDER = GAME_UE4_27 + 32,
         GAME_Lego2KDrive = GAME_UE4_27 + 33,
+        GAME_CenturyAgeofAshes = GAME_UE4_27 + 34,
+        GAME_EmbersofTheUncrowned = GAME_UE4_27 + 35,
+        GAME_eBaseballProSpirit = GAME_UE4_27 + 36,
     GAME_UE4_28 = GameUtils.GameUe4Base + (28 << 16),
 
     GAME_UE4_LATEST = GAME_UE4_28,
