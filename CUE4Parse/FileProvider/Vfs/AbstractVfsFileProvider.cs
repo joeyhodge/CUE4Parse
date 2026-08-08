@@ -259,15 +259,9 @@ namespace CUE4Parse.FileProvider.Vfs
 
             _unloadedVfs[reader] = null;
             reader.IsConcurrent = isConcurrent;
-            if (reader.Game == EGame.GAME_eBaseballProSpirit)
+            if (ProSpiAes.IsProSpiArchive(reader.Path))
             {
-                // Prefer the versioned static decryptor when the dedicated game profile is selected.
-                reader.CustomEncryption = ProSpiEncryption.ProSpiDecrypt;
-            }
-            else if (ProSpiAes.IsProSpiArchive(reader.Path))
-            {
-                // Preserve the live bridge for older profiles and Professional Baseball Spirits builds.
-                reader.CustomEncryption = ProSpiAes.ProSpiDecrypt;
+                reader.CustomEncryption = ProSpiAes.ProSpiDecryptAuto;
             }
             else if (!(reader.Game == EGame.GAME_MarvelRivals && reader is IoStoreReader)) // no custom encryption for MR IoStore
             {

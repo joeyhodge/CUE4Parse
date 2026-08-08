@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Threading;
 using CUE4Parse.UE4.Objects.Core.Misc;
 using CUE4Parse.UE4.VirtualFileSystem;
 using Serilog;
@@ -40,6 +41,11 @@ public static class ProSpiAes
 
     private static readonly ILogger Log = Serilog.Log.ForContext(typeof(ProSpiAes));
     private static readonly object BridgeLock = new();
+    private static readonly object AutoModeLock = new();
+    private const int AutoModeUnknown = 0;
+    private const int AutoModeLive = 1;
+    private const int AutoModeStatic = 2;
+    private static int _autoMode;
     private static IntPtr _processHandle;
     private static int _processId;
     private static long _moduleBase;
@@ -74,6 +80,52 @@ public static class ProSpiAes
         {
             EnsureBridge(reader.Path);
             return RemoteDecrypt(input, reader.EncryptionKeyGuid);
+        }
+    }
+
+    public static byte[] ProSpiDecryptAuto(byte[] bytes, int beginOffset, int count, bool isIndex, IAesVfsReader reader)
+    {
+        var mode = Volatile.Read(ref _autoMode);
+        if (mode == AutoModeLive)
+            return ProSpiDecrypt(bytes, beginOffset, count, isIndex, reader);
+        if (mode == AutoModeStatic)
+            return ProSpiEncryption.ProSpiDecrypt(bytes, beginOffset, count, isIndex, reader);
+
+        lock (AutoModeLock)
+        {
+            mode = Volatile.Read(ref _autoMode);
+            if (mode == AutoModeLive)
+                return ProSpiDecrypt(bytes, beginOffset, count, isIndex, reader);
+            if (mode == AutoModeStatic)
+                return ProSpiEncryption.ProSpiDecrypt(bytes, beginOffset, count, isIndex, reader);
+
+            Exception? liveException = null;
+            try
+            {
+                var output = ProSpiDecrypt(bytes, beginOffset, count, isIndex, reader);
+                Volatile.Write(ref _autoMode, AutoModeLive);
+                Log.Information("ProSpi automatic decryption selected the live game bridge");
+                return output;
+            }
+            catch (Exception ex)
+            {
+                liveException = ex;
+                Log.Warning(ex, "ProSpi live decrypt bridge unavailable; trying the static decryptor");
+            }
+
+            try
+            {
+                var output = ProSpiEncryption.ProSpiDecrypt(bytes, beginOffset, count, isIndex, reader);
+                Volatile.Write(ref _autoMode, AutoModeStatic);
+                Log.Information("ProSpi automatic decryption selected the static decryptor");
+                return output;
+            }
+            catch (Exception staticException)
+            {
+                throw new AggregateException(
+                    "Both the ProSpi live bridge and static decryptor failed.",
+                    liveException!, staticException);
+            }
         }
     }
 
